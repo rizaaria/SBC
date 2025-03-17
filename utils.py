@@ -2,7 +2,7 @@ import numpy as np
 from numba import njit, prange
 
 
-@njit(parallel=True)
+@njit(parallel=True, fastmath=True)
 def compute_distances(X, Y, L=2):
     nX = X.shape[0]
     nY = Y.shape[0]
@@ -19,12 +19,13 @@ def compute_distances(X, Y, L=2):
     return dists
 
 
+@njit(parallel=True, fastmath=True)
 def svm_loss(W, X, y, reg):
-    '''
+    """
     Structured SVM loss function, naive implementation (with loops).
 
-    Inputs have dimension D, there are C classes, 
-    and we operate on minibatches of N examples.
+    Inputs have dimension D, there are C classes, and we operate on minibatches
+    of N examples.
 
     Inputs:
     - W: A numpy array of shape (D+1, C) containing weights.
@@ -34,34 +35,88 @@ def svm_loss(W, X, y, reg):
     - reg: (float) regularization strength
 
     Returns a tuple of:
-    - loss as single float
-    - gradient with respect to weights W; an array of same shape as W
+    - loss: loss as single float
+    - dW: gradient with respect to weights W; an array of same shape as W
 
     References:
     - https://github.com/mantasu/cs231n
     - https://github.com/jariasf/CS231n
-    '''
 
+    """
     X  = np.hstack((X, np.ones((X.shape[0],1)))) # the last column is 1: to allow augmentation of bias vector into W
 
-    loss = 0.0
     dW = np.zeros(W.shape)  # initialize the gradient as zero
 
+    # compute the loss and the gradient
+    num_classes = W.shape[1]
     num_train = X.shape[0]
-    scores = X.dot(W)
-    correct_class_scores = scores[ np.arange(num_train), y].reshape(num_train,1)
-    margin = np.maximum(0.0, scores - correct_class_scores + 1.0)
-    margin[ np.arange(num_train), y] = 0.0 # do not consider correct class in loss
-    loss = margin.sum() / num_train + reg * np.sum(W * W)
+    loss = 0.0
+    
+    for i in prange(num_train):
+        scores = X[i].dot(W)
+        correct_class_score = scores[y[i]]
 
-    # Compute gradient
-    margin[margin > 0.0] = 1.0
-    valid_margin_count = margin.sum(axis=1)
-    # Subtract in correct class (-s_y)
-    margin[np.arange(num_train), y] -= valid_margin_count
-    dW = (X.T).dot(margin) / num_train
+        for j in prange(num_classes):
+            if j == y[i]:
+                continue
+            
+            margin = scores[j] - correct_class_score + 1  # note delta = 1
+            if margin > 0:
+                loss += margin
+                dW[:, j] += X[i]    # update gradient for incorrect label
+                dW[:, y[i]] -= X[i] # update gradient for correct label
 
-    # Regularization gradient
-    dW = dW + 2.0 * reg * W
+    # Right now the loss is a sum over all training examples, but we want it
+    # to be an average instead so we divide by num_train.
+    loss /= num_train
+
+    loss += reg * np.sum(W * W) # add regularization to the loss.
+    dW /= num_train   # scale gradient ovr the number of samples
+    dW += 2 * reg * W # append partial derivative of regularization term
+
+    return loss, dW
+
+
+@njit(parallel=True, fastmath=True)
+def softmax_loss(W, X, y, reg):
+    """
+    Softmax loss function, naive implementation (with loops)
+
+    Inputs have dimension D, there are C classes, and we operate on minibatches
+    of N examples.
+
+    Inputs:
+    - W: A numpy array of shape (D, C) containing weights.
+    - X: A numpy array of shape (N, D) containing a minibatch of data.
+    - y: A numpy array of shape (N,) containing training labels; y[i] = c means
+      that X[i] has label c, where 0 <= c < C.
+    - reg: (float) regularization strength
+
+    Returns a tuple of:
+    - loss: loss as single float
+    - dW: gradient with respect to weights W; an array of same shape as W
+
+    References:
+    - https://github.com/mantasu/cs231n
+    - https://github.com/jariasf/CS231n
+    
+    """
+    # Initialize the loss and gradient to zero.
+    loss = 0.0
+    dW = np.zeros_like(W)
+
+    N = X.shape[0] # num samples
+    X  = np.hstack((X, np.ones((X.shape[0],1)))) # the last column is 1: to allow augmentation of bias vector into W
+
+    for i in prange(N):
+        y_hat = X[i] @ W                    # raw scores vector
+        y_exp = np.exp(y_hat - y_hat.max()) # numerically stable exponent vector
+        softmax = y_exp / y_exp.sum()       # pure softmax for each score
+        loss = loss - np.log(softmax[y[i]]) # append cross-entropy
+        softmax[y[i]] = softmax[y[i]] - 1   # update for gradient
+        dW += np.outer(X[i], softmax)       # gradient
+
+    loss = loss / N + reg * np.sum(W**2)    # average loss and regularize 
+    dW = dW / N + 2 * reg * W               # finish calculating gradient
 
     return loss, dW
